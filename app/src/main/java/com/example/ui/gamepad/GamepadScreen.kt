@@ -1,6 +1,16 @@
 package com.example.ui.gamepad
 
+import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import com.example.data.bluetooth.BluetoothControllerState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -95,6 +105,66 @@ fun GamepadScreen(
     val tvState by viewModel.tvConnectionState.collectAsState()
     val latency by viewModel.latencyMs.collectAsState()
     val rgbProgress by viewModel.rgbProgress.collectAsState()
+    val btState by viewModel.bluetoothState.collectAsState()
+
+    val bluetoothPermissions = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_ADVERTISE,
+                Manifest.permission.BLUETOOTH_SCAN
+            )
+        } else {
+            arrayOf(
+                Manifest.permission.BLUETOOTH,
+                Manifest.permission.BLUETOOTH_ADMIN
+            )
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            results[Manifest.permission.BLUETOOTH_CONNECT] == true &&
+            results[Manifest.permission.BLUETOOTH_ADVERTISE] == true
+        } else {
+            true
+        }
+        if (granted) {
+            viewModel.bluetoothGamepadManager.startBluetoothController()
+        }
+    }
+
+    val enableBtLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        viewModel.bluetoothGamepadManager.startBluetoothController()
+    }
+
+    // Auto-request Bluetooth permissions & automatically turn on Bluetooth Gamepad mode
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val hasConnect = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            val hasAdvertise = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED
+            if (!hasConnect || !hasAdvertise) {
+                permissionLauncher.launch(bluetoothPermissions)
+            } else {
+                viewModel.bluetoothGamepadManager.startBluetoothController()
+            }
+        } else {
+            viewModel.bluetoothGamepadManager.startBluetoothController()
+        }
+    }
+
+    // Auto-launch turn on Bluetooth prompt if device Bluetooth is switched off
+    LaunchedEffect(btState) {
+        if (btState is BluetoothControllerState.BluetoothDisabledOnDevice) {
+            try {
+                enableBtLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+            } catch (_: Exception) {}
+        }
+    }
 
     val isXboxProfile = profile.id == "builtin_xbox" || profile.name.contains("Xbox", ignoreCase = true)
 
@@ -497,7 +567,7 @@ fun GamepadScreen(
                                 }
                             }
 
-                            // SECTION 2: TV CONNECTION & WI-FI
+                            // SECTION 2: TV CONNECTION (BLUETOOTH GAMEPAD & WI-FI)
                             Card(
                                 colors = CardDefaults.cardColors(containerColor = Color(0xFF131D31)),
                                 shape = RoundedCornerShape(14.dp),
@@ -519,26 +589,47 @@ fun GamepadScreen(
                                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                                         ) {
                                             Icon(
-                                                imageVector = Icons.Default.Tv,
+                                                imageVector = Icons.Default.SportsEsports,
                                                 contentDescription = null,
-                                                tint = Color(0xFF00F0FF),
+                                                tint = Color(0xFF00FF66),
                                                 modifier = Modifier.size(18.dp)
                                             )
                                             Text(
-                                                text = "TV CONNECTION & STREAMING",
-                                                color = Color(0xFF00F0FF),
+                                                text = "TV & XBOX CONNECTION",
+                                                color = Color(0xFF00FF66),
                                                 fontSize = 12.sp,
                                                 fontWeight = FontWeight.Bold
                                             )
                                         }
                                         Surface(
-                                            color = if (tvState is TvConnectionState.Connected) Color(0xFF0F2615) else Color(0xFF1E293B),
+                                            color = when (btState) {
+                                                is BluetoothControllerState.Connected -> Color(0xFF0F2615)
+                                                is BluetoothControllerState.ReadyToPair -> Color(0xFF281F0B)
+                                                else -> if (tvState is TvConnectionState.Connected) Color(0xFF0F2615) else Color(0xFF1E293B)
+                                            },
                                             shape = RoundedCornerShape(8.dp),
-                                            border = BorderStroke(1.dp, if (tvState is TvConnectionState.Connected) Color(0xFF107C10) else Color(0xFF334155))
+                                            border = BorderStroke(
+                                                1.dp,
+                                                when (btState) {
+                                                    is BluetoothControllerState.Connected -> Color(0xFF107C10)
+                                                    is BluetoothControllerState.ReadyToPair -> Color(0xFFFFD600)
+                                                    else -> if (tvState is TvConnectionState.Connected) Color(0xFF107C10) else Color(0xFF334155)
+                                                }
+                                            )
                                         ) {
                                             Text(
-                                                text = if (tvState is TvConnectionState.Connected) "Connected (${latency}ms)" else "Not Connected",
-                                                color = if (tvState is TvConnectionState.Connected) Color(0xFF00FF66) else Color(0xFF94A3B8),
+                                                text = when (val st = btState) {
+                                                    is BluetoothControllerState.Connected -> "BT: Connected"
+                                                    is BluetoothControllerState.ReadyToPair -> "BT: Broadcasting"
+                                                    is BluetoothControllerState.PermissionRequired -> "BT: Permission Needed"
+                                                    else -> if (tvState is TvConnectionState.Connected) "Wi-Fi: Connected (${latency}ms)" else "BT: Ready"
+                                                },
+                                                color = when (btState) {
+                                                    is BluetoothControllerState.Connected -> Color(0xFF00FF66)
+                                                    is BluetoothControllerState.ReadyToPair -> Color(0xFFFFD600)
+                                                    is BluetoothControllerState.PermissionRequired -> Color(0xFFFF5252)
+                                                    else -> if (tvState is TvConnectionState.Connected) Color(0xFF00FF66) else Color(0xFF94A3B8)
+                                                },
                                                 fontSize = 11.sp,
                                                 fontWeight = FontWeight.SemiBold,
                                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
@@ -555,22 +646,37 @@ fun GamepadScreen(
                                                 isSettingsMenuOpen = false
                                                 onOpenTvDialog()
                                             },
-                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00F0FF), contentColor = Color.Black),
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF107C10), contentColor = Color.White),
                                             modifier = Modifier.weight(1f)
                                         ) {
                                             Icon(Icons.Default.Tv, contentDescription = null, modifier = Modifier.size(16.dp))
                                             Spacer(Modifier.width(6.dp))
-                                            Text("Connect TV / Wi-Fi", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                            Text("Connect TV Hub", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                         }
 
-                                        if (tvState is TvConnectionState.Connected) {
+                                        if (btState is BluetoothControllerState.Connected || btState is BluetoothControllerState.ReadyToPair) {
                                             OutlinedButton(
-                                                onClick = { viewModel.disconnectTv() },
+                                                onClick = { viewModel.bluetoothGamepadManager.stop() },
                                                 colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF5252)),
                                                 border = BorderStroke(1.dp, Color(0xFFFF5252)),
                                                 modifier = Modifier.weight(1f)
                                             ) {
-                                                Text("Disconnect", fontSize = 12.sp)
+                                                Text("Stop BT", fontSize = 12.sp)
+                                            }
+                                        } else {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                                        permissionLauncher.launch(bluetoothPermissions)
+                                                    } else {
+                                                        viewModel.bluetoothGamepadManager.startBluetoothController()
+                                                    }
+                                                },
+                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF00FF66)),
+                                                border = BorderStroke(1.dp, Color(0xFF00FF66)),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Text("Start BT Gamepad", fontSize = 12.sp)
                                             }
                                         }
                                     }

@@ -247,4 +247,37 @@ class ExampleRobolectricTest {
         vm.selectProfile(disabled)
         assertEquals(0f, vm.rgbProgress.value, 0.001f)
     }
+
+    @Test
+    fun bluetooth_gamepad_manager_safety_and_lifecycle() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val btManager = com.example.data.bluetooth.BluetoothGamepadManager(app)
+
+        // Initial state is Disabled
+        assertEquals(com.example.data.bluetooth.BluetoothControllerState.Disabled, btManager.state.value)
+
+        // Starting controller must NEVER crash with uncaught SecurityException
+        btManager.startBluetoothController()
+
+        // State is safely captured (PermissionRequired or Unsupported on test JVM)
+        val currentState = btManager.state.value
+        assertTrue(
+            currentState is com.example.data.bluetooth.BluetoothControllerState.PermissionRequired ||
+            currentState is com.example.data.bluetooth.BluetoothControllerState.Unsupported ||
+            currentState is com.example.data.bluetooth.BluetoothControllerState.BluetoothDisabledOnDevice ||
+            currentState is com.example.data.bluetooth.BluetoothControllerState.ReadyToPair
+        )
+
+        // Bonded devices list and autoConnect must execute safely without throwing exceptions
+        val bonded = btManager.getBondedDevices()
+        assertNotNull(bonded)
+
+        val autoConnectResult = btManager.autoConnect("00:11:22:33:44:55")
+        // In JVM test environment with no physical radio, autoConnect returns false without crashing
+        assertFalse(autoConnectResult)
+
+        // Stopping restores Disabled safely
+        btManager.stop()
+        assertEquals(com.example.data.bluetooth.BluetoothControllerState.Disabled, btManager.state.value)
+    }
 }

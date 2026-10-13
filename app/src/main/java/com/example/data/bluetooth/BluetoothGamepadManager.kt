@@ -1,5 +1,6 @@
 package com.example.data.bluetooth
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
@@ -9,7 +10,9 @@ import android.bluetooth.BluetoothHidDeviceAppSdpSettings
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
+import androidx.core.content.ContextCompat
 import com.example.core.model.GamepadButton
 import com.example.core.model.SpadInputState
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,15 +20,31 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.Executors
 
+data class PairedBluetoothDevice(
+    val name: String,
+    val address: String,
+    val isTvOrDisplay: Boolean
+)
+
 sealed class BluetoothControllerState {
     object Disabled : BluetoothControllerState()
+    object PermissionRequired : BluetoothControllerState()
+    object BluetoothDisabledOnDevice : BluetoothControllerState()
     data class Unsupported(val reason: String) : BluetoothControllerState()
     data class ReadyToPair(val localName: String) : BluetoothControllerState()
+    data class Connecting(val deviceName: String, val address: String) : BluetoothControllerState()
     data class Connected(val deviceName: String, val address: String) : BluetoothControllerState()
     data class Error(val message: String) : BluetoothControllerState()
 }
 
-class BluetoothGamepadManager(private val context: Context) {
+/**
+ * Manages Bluetooth HID Gamepad emulation for Samsung Smart TVs and Xbox Cloud Gaming app.
+ * Provides auto-connection to paired Samsung TVs, safe permission checks, and robust error recovery.
+ */
+class BluetoothGamepadManager(
+    private val context: Context,
+    var onDeviceConnected: ((address: String, name: String) -> Unit)? = null
+) {
 
     private val _state = MutableStateFlow<BluetoothControllerState>(BluetoothControllerState.Disabled)
     val state: StateFlow<BluetoothControllerState> = _state.asStateFlow()
@@ -37,10 +56,13 @@ class BluetoothGamepadManager(private val context: Context) {
     private var connectedDevice: BluetoothDevice? = null
     private val executor = Executors.newSingleThreadExecutor()
 
+    var preferredAddress: String = ""
+    var autoConnectEnabled: Boolean = true
+
     companion object {
         private const val REPORT_ID_GAMEPAD = 1.toByte()
 
-        // Standard HID Gamepad Descriptor (compatible with Samsung Tizen, Windows, Linux, Android)
+        // Standard HID Gamepad Descriptor (compatible with Samsung Tizen, Xbox App, Windows, Linux, Android)
         val HID_DESCRIPTOR = byteArrayOf(
             0x05.toByte(), 0x01.toByte(), // USAGE_PAGE (Generic Desktop)
             0x09.toByte(), 0x05.toByte(), // USAGE (Gamepad)
@@ -99,6 +121,19 @@ class BluetoothGamepadManager(private val context: Context) {
         )
     }
 
+    /**
+     * Checks if all required runtime Bluetooth permissions are granted.
+     */
+    fun hasRequiredPermissions(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val connectGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            val advertiseGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED
+            connectGranted && advertiseGranted
+        } else {
+            true
+        }
+    }
+
     private val serviceListener = object : BluetoothProfile.ServiceListener {
         @SuppressLint("MissingPermission")
         override fun onServiceConnected(profile: Int, proxy: BluetoothProfile?) {
@@ -120,13 +155,26 @@ class BluetoothGamepadManager(private val context: Context) {
         @SuppressLint("MissingPermission")
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
             if (registered) {
-                val localName = try { bluetoothAdapter?.name ?: "S!pad Gamepad" } catch (_: Exception) { "S!pad Gamepad" }
+                val localName = try {
+                    if (hasRequiredPermissions()) bluetoothAdapter?.name ?: "S!pad Gamepad" else "S!pad Gamepad"
+                } catch (_: Throwable) {
+                    "S!pad Gamepad"
+                }
                 if (pluggedDevice != null) {
                     connectedDevice = pluggedDevice
-                    val name = try { pluggedDevice.name ?: pluggedDevice.address } catch (_: Exception) { pluggedDevice.address }
+                    val name = try {
+                        if (hasRequiredPermissions()) pluggedDevice.name ?: pluggedDevice.address else pluggedDevice.address
+                    } catch (_: Throwable) {
+                        pluggedDevice.address
+                    }
                     _state.value = BluetoothControllerState.Connected(name, pluggedDevice.address)
+                    onDeviceConnected?.invoke(pluggedDevice.address, name)
                 } else {
                     _state.value = BluetoothControllerState.ReadyToPair(localName)
+                    // Auto-connect to previously paired Samsung TV
+                    if (autoConnectEnabled) {
+                        autoConnect()
+                    }
                 }
             } else {
                 _state.value = BluetoothControllerState.Disabled
@@ -138,30 +186,74 @@ class BluetoothGamepadManager(private val context: Context) {
             when (state) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     connectedDevice = device
-                    val devName = try { device?.name ?: device?.address ?: "Samsung TV" } catch (_: Exception) { "Samsung TV" }
+                    val devName = try {
+                        if (hasRequiredPermissions()) device?.name ?: device?.address ?: "Samsung TV" else "Samsung TV"
+                    } catch (_: Throwable) {
+                        "Samsung TV"
+                    }
                     val addr = device?.address ?: ""
                     _state.value = BluetoothControllerState.Connected(devName, addr)
+                    if (addr.isNotBlank()) {
+                        onDeviceConnected?.invoke(addr, devName)
+                    }
+                }
+                BluetoothProfile.STATE_CONNECTING -> {
+                    val devName = try {
+                        if (hasRequiredPermissions()) device?.name ?: device?.address ?: "Samsung TV" else "Samsung TV"
+                    } catch (_: Throwable) {
+                        "Samsung TV"
+                    }
+                    val addr = device?.address ?: ""
+                    _state.value = BluetoothControllerState.Connecting(devName, addr)
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     connectedDevice = null
-                    val localName = try { bluetoothAdapter?.name ?: "S!pad Gamepad" } catch (_: Exception) { "S!pad Gamepad" }
+                    val localName = try {
+                        if (hasRequiredPermissions()) bluetoothAdapter?.name ?: "S!pad Gamepad" else "S!pad Gamepad"
+                    } catch (_: Throwable) {
+                        "S!pad Gamepad"
+                    }
                     _state.value = BluetoothControllerState.ReadyToPair(localName)
                 }
             }
         }
     }
 
+    /**
+     * Initializes the Bluetooth HID Device profile with full safety checks against SecurityExceptions.
+     */
     fun startBluetoothController() {
-        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
-            _state.value = BluetoothControllerState.Unsupported("Bluetooth is disabled on this device. Please turn Bluetooth ON in device settings.")
+        if (!hasRequiredPermissions()) {
+            _state.value = BluetoothControllerState.PermissionRequired
+            return
+        }
+
+        if (bluetoothAdapter == null) {
+            _state.value = BluetoothControllerState.Unsupported("This device does not have Bluetooth hardware.")
+            return
+        }
+
+        val isEnabled = try {
+            bluetoothAdapter.isEnabled
+        } catch (_: SecurityException) {
+            _state.value = BluetoothControllerState.PermissionRequired
+            return
+        } catch (e: Exception) {
+            false
+        }
+
+        if (!isEnabled) {
+            _state.value = BluetoothControllerState.BluetoothDisabledOnDevice
             return
         }
 
         try {
             val success = bluetoothAdapter.getProfileProxy(context, serviceListener, BluetoothProfile.HID_DEVICE)
             if (!success) {
-                _state.value = BluetoothControllerState.Unsupported("This phone's chipset does not expose Bluetooth HID Device peripheral mode.")
+                _state.value = BluetoothControllerState.Unsupported("This phone's chipset does not support Bluetooth HID Device peripheral mode.")
             }
+        } catch (_: SecurityException) {
+            _state.value = BluetoothControllerState.PermissionRequired
         } catch (e: Exception) {
             _state.value = BluetoothControllerState.Error(e.message ?: "Failed to initialize Bluetooth HID Device")
         }
@@ -169,6 +261,11 @@ class BluetoothGamepadManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     private fun registerApp() {
+        if (!hasRequiredPermissions()) {
+            _state.value = BluetoothControllerState.PermissionRequired
+            return
+        }
+
         val sdp = BluetoothHidDeviceAppSdpSettings(
             "S!pad Gamepad",
             "Virtual Gamepad for Samsung TV",
@@ -185,7 +282,98 @@ class BluetoothGamepadManager(private val context: Context) {
             BluetoothHidDeviceAppQosSettings.MAX
         )
 
-        hidDevice?.registerApp(sdp, null, qos, executor, hidCallback)
+        try {
+            hidDevice?.registerApp(sdp, null, qos, executor, hidCallback)
+        } catch (_: SecurityException) {
+            _state.value = BluetoothControllerState.PermissionRequired
+        } catch (e: Exception) {
+            _state.value = BluetoothControllerState.Error(e.message ?: "Failed to register HID Gamepad profile")
+        }
+    }
+
+    /**
+     * Retrieves all paired/bonded Bluetooth devices with Samsung TVs and displays sorted to the top.
+     */
+    @SuppressLint("MissingPermission")
+    fun getBondedDevices(): List<PairedBluetoothDevice> {
+        if (!hasRequiredPermissions() || bluetoothAdapter == null) return emptyList()
+        return try {
+            val bonded = bluetoothAdapter.bondedDevices ?: emptySet()
+            bonded.map { dev ->
+                val name = try { dev.name ?: "Unknown Device" } catch (_: Throwable) { "Unknown Device" }
+                val isTv = name.contains("TV", ignoreCase = true) ||
+                           name.contains("Samsung", ignoreCase = true) ||
+                           name.contains("Tizen", ignoreCase = true) ||
+                           name.contains("Display", ignoreCase = true) ||
+                           name.contains("Screen", ignoreCase = true) ||
+                           dev.bluetoothClass?.deviceClass == android.bluetooth.BluetoothClass.Device.Major.AUDIO_VIDEO
+                PairedBluetoothDevice(
+                    name = name,
+                    address = dev.address,
+                    isTvOrDisplay = isTv
+                )
+            }.sortedWith(compareByDescending<PairedBluetoothDevice> { it.isTvOrDisplay }.thenBy { it.name })
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Connects to a specific bonded Bluetooth device by address.
+     */
+    @SuppressLint("MissingPermission")
+    fun connectToDevice(address: String): Boolean {
+        if (!hasRequiredPermissions() || bluetoothAdapter == null) return false
+        val hid = hidDevice ?: return false
+        return try {
+            val device = bluetoothAdapter.getRemoteDevice(address)
+            val devName = try { device.name ?: address } catch (_: Throwable) { address }
+            _state.value = BluetoothControllerState.Connecting(devName, address)
+            val success = hid.connect(device)
+            if (!success) {
+                val localName = try { bluetoothAdapter.name ?: "S!pad Gamepad" } catch (_: Throwable) { "S!pad Gamepad" }
+                _state.value = BluetoothControllerState.ReadyToPair(localName)
+            }
+            success
+        } catch (e: Exception) {
+            val localName = try { bluetoothAdapter?.name ?: "S!pad Gamepad" } catch (_: Throwable) { "S!pad Gamepad" }
+            _state.value = BluetoothControllerState.ReadyToPair(localName)
+            false
+        }
+    }
+
+    /**
+     * Automatically connects to the previously connected TV, or the first bonded Samsung TV found.
+     */
+    @SuppressLint("MissingPermission")
+    fun autoConnect(targetAddress: String = preferredAddress): Boolean {
+        if (!hasRequiredPermissions() || bluetoothAdapter == null || hidDevice == null) return false
+        return try {
+            val bonded = bluetoothAdapter.bondedDevices ?: emptySet()
+            if (bonded.isEmpty()) return false
+
+            // 1. First priority: Target or preferred saved TV address
+            if (targetAddress.isNotBlank()) {
+                val matched = bonded.firstOrNull { it.address.equals(targetAddress, ignoreCase = true) }
+                if (matched != null) {
+                    return connectToDevice(matched.address)
+                }
+            }
+
+            // 2. Second priority: Any bonded device with TV or Samsung in its name
+            val tvDevice = bonded.firstOrNull { dev ->
+                val name = try { dev.name ?: "" } catch (_: Throwable) { "" }
+                name.contains("TV", ignoreCase = true) ||
+                name.contains("Samsung", ignoreCase = true) ||
+                name.contains("Tizen", ignoreCase = true)
+            }
+            if (tvDevice != null) {
+                return connectToDevice(tvDevice.address)
+            }
+            false
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -251,17 +439,19 @@ class BluetoothGamepadManager(private val context: Context) {
 
         try {
             hid.sendReport(dev, REPORT_ID_GAMEPAD.toInt(), report)
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     @SuppressLint("MissingPermission")
     fun stop() {
         try {
             hidDevice?.unregisterApp()
+        } catch (_: Throwable) {}
+        try {
             if (bluetoothAdapter != null && hidDevice != null) {
                 bluetoothAdapter.closeProfileProxy(BluetoothProfile.HID_DEVICE, hidDevice)
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
         hidDevice = null
         connectedDevice = null
         _state.value = BluetoothControllerState.Disabled

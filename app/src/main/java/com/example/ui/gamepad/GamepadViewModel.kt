@@ -44,7 +44,11 @@ class GamepadViewModel(application: Application) : AndroidViewModel(application)
         }
     }
     val pcTransport = PcReceiverUdpTransport()
-    val bluetoothGamepadManager = com.example.data.bluetooth.BluetoothGamepadManager(application)
+    val bluetoothGamepadManager = com.example.data.bluetooth.BluetoothGamepadManager(application) { address, name ->
+        viewModelScope.launch {
+            preferencesRepository.saveBtTvConnection(address, name)
+        }
+    }
 
     // State flows
     val inputState: StateFlow<SpadInputState> = inputEngine.inputState
@@ -72,6 +76,8 @@ class GamepadViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             preferencesRepository.preferencesFlow.collectLatest { prefs ->
                 _preferencesFlow.value = prefs
+                bluetoothGamepadManager.preferredAddress = prefs.lastBtTvAddress
+                bluetoothGamepadManager.autoConnectEnabled = prefs.btAutoConnect
                 pcTransport.configureTarget(prefs.pcReceiverIp, prefs.pcReceiverPort)
                 val profile = profileRepository.getProfileById(prefs.activeProfileId)
                 if (profile != null) {
@@ -187,6 +193,22 @@ class GamepadViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             tvTransport.disconnect()
         }
+    }
+
+    fun setBtAutoConnect(enabled: Boolean) {
+        bluetoothGamepadManager.autoConnectEnabled = enabled
+        viewModelScope.launch {
+            preferencesRepository.setBtAutoConnect(enabled)
+        }
+    }
+
+    fun connectToBluetoothDevice(address: String) {
+        bluetoothGamepadManager.connectToDevice(address)
+    }
+
+    fun autoConnectBluetoothTv() {
+        val prefs = preferencesFlow.value
+        bluetoothGamepadManager.autoConnect(prefs.lastBtTvAddress)
     }
 
     override fun onCleared() {

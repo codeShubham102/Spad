@@ -17,12 +17,25 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothConnected
+import androidx.compose.material.icons.filled.BluetoothDisabled
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.Wifi
@@ -30,10 +43,14 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Divider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -53,6 +70,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.example.core.model.DiscoveredTv
 import com.example.core.model.TvConnectionState
 import com.example.data.bluetooth.BluetoothControllerState
@@ -76,7 +94,72 @@ fun TvConnectDialog(
     val btState by viewModel.bluetoothState.collectAsState()
 
     var manualIp by remember(prefs.lastTvIp) { mutableStateOf(prefs.lastTvIp) }
-    var selectedTab by remember { mutableIntStateOf(0) } // 0 = Wi-Fi Remote, 1 = Bluetooth Gamepad (Xbox App)
+    var selectedTab by remember { mutableIntStateOf(1) } // Default to 1: Bluetooth Gamepad for Samsung TV & Xbox Cloud Gaming
+
+    val bluetoothPermissions = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_ADVERTISE,
+                Manifest.permission.BLUETOOTH_SCAN
+            )
+        } else {
+            arrayOf(
+                Manifest.permission.BLUETOOTH,
+                Manifest.permission.BLUETOOTH_ADMIN
+            )
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            results[Manifest.permission.BLUETOOTH_CONNECT] == true &&
+            results[Manifest.permission.BLUETOOTH_ADVERTISE] == true
+        } else {
+            true
+        }
+        if (granted) {
+            viewModel.bluetoothGamepadManager.startBluetoothController()
+        }
+    }
+
+    val enableBtLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        viewModel.bluetoothGamepadManager.startBluetoothController()
+    }
+
+    val requestBluetoothAndStart = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val connectGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            val advertiseGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED
+            if (!connectGranted || !advertiseGranted) {
+                permissionLauncher.launch(bluetoothPermissions)
+            } else {
+                viewModel.bluetoothGamepadManager.startBluetoothController()
+            }
+        } else {
+            viewModel.bluetoothGamepadManager.startBluetoothController()
+        }
+    }
+
+    // Auto-request Bluetooth permissions & start Bluetooth Gamepad controller immediately
+    LaunchedEffect(selectedTab) {
+        if (selectedTab == 1) {
+            requestBluetoothAndStart()
+        }
+    }
+
+    // Auto-launch Bluetooth turn-on prompt if Bluetooth is switched off on device
+    LaunchedEffect(btState) {
+        if (btState is BluetoothControllerState.BluetoothDisabledOnDevice) {
+            try {
+                enableBtLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+            } catch (_: Exception) {}
+        }
+    }
 
     LaunchedEffect(prefs.lastTvIp, prefs.lastTvName) {
         if (prefs.lastTvIp.isNotBlank()) {
@@ -353,8 +436,17 @@ fun TvConnectDialog(
                                     is BluetoothControllerState.Connected -> {
                                         Text("CONNECTED", color = Color(0xFF00FF66), fontWeight = FontWeight.Black, fontSize = 11.sp)
                                     }
+                                    is BluetoothControllerState.Connecting -> {
+                                        Text("CONNECTING...", color = Color(0xFF00F0FF), fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    }
                                     is BluetoothControllerState.ReadyToPair -> {
                                         Text("READY TO PAIR", color = Color(0xFFFFD600), fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    }
+                                    is BluetoothControllerState.PermissionRequired -> {
+                                        Text("PERMISSION NEEDED", color = Color(0xFFFF5252), fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    }
+                                    is BluetoothControllerState.BluetoothDisabledOnDevice -> {
+                                        Text("BT TURNED OFF", color = Color(0xFFFFB300), fontWeight = FontWeight.Bold, fontSize = 11.sp)
                                     }
                                     else -> {
                                         Text("OFF", color = Color(0xFF94A3B8), fontSize = 11.sp)
@@ -364,35 +456,181 @@ fun TvConnectDialog(
 
                             when (val st = btState) {
                                 is BluetoothControllerState.Connected -> {
-                                    Text(
-                                        "Connected to ${st.deviceName} as an Xbox Controller!",
-                                        color = Color(0xFF00FF66),
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp
-                                    )
-                                    Text(
-                                        "Open Xbox App on your Samsung TV now — it will recognize this controller!",
-                                        color = Color(0xFFCBD5E1),
-                                        fontSize = 11.sp
-                                    )
+                                    Surface(
+                                        color = Color(0xFF0B2414),
+                                        shape = RoundedCornerShape(8.dp),
+                                        border = BorderStroke(1.dp, Color(0xFF107C10)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(modifier = Modifier.padding(8.dp)) {
+                                            Text(
+                                                "Connected to ${st.deviceName} as Xbox Controller!",
+                                                color = Color(0xFF00FF66),
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.sp
+                                            )
+                                            Spacer(Modifier.height(2.dp))
+                                            Text(
+                                                "Open Xbox App on your Samsung TV now — it will recognize this controller!",
+                                                color = Color(0xFFCBD5E1),
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    }
+                                }
+                                is BluetoothControllerState.Connecting -> {
+                                    Surface(
+                                        color = Color(0xFF0B1E2D),
+                                        shape = RoundedCornerShape(8.dp),
+                                        border = BorderStroke(1.dp, Color(0xFF00F0FF)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            CircularProgressIndicator(color = Color(0xFF00F0FF), modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                            Text(
+                                                "Connecting to ${st.deviceName}...",
+                                                color = Color(0xFF00F0FF),
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.sp
+                                            )
+                                        }
+                                    }
                                 }
                                 is BluetoothControllerState.ReadyToPair -> {
-                                    Text(
-                                        "Broadcasting as \"${st.localName}\". Now pair on your Samsung TV!",
-                                        color = Color(0xFFFFD600),
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp
-                                    )
+                                    Surface(
+                                        color = Color(0xFF281F0B),
+                                        shape = RoundedCornerShape(8.dp),
+                                        border = BorderStroke(1.dp, Color(0xFFFFD600)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(modifier = Modifier.padding(8.dp)) {
+                                            Text(
+                                                "Broadcasting as \"${st.localName}\"",
+                                                color = Color(0xFFFFD600),
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.sp
+                                            )
+                                            Spacer(Modifier.height(2.dp))
+                                            Text(
+                                                "Pair from Samsung TV Bluetooth Device List, or tap a paired TV below to connect!",
+                                                color = Color(0xFFCBD5E1),
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    }
+                                }
+                                is BluetoothControllerState.PermissionRequired -> {
+                                    Surface(
+                                        color = Color(0xFF2E1212),
+                                        shape = RoundedCornerShape(8.dp),
+                                        border = BorderStroke(1.dp, Color(0xFFFF5252)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Icon(Icons.Default.Security, contentDescription = null, tint = Color(0xFFFF5252), modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.width(6.dp))
+                                                Text("Bluetooth Permission Required", color = Color(0xFFFF8888), fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                            }
+                                            Text(
+                                                "Android requires Nearby Devices (Bluetooth) permission so Samsung TV can discover this phone as a game controller.",
+                                                color = Color(0xFFCBD5E1),
+                                                fontSize = 10.sp,
+                                                lineHeight = 14.sp
+                                            )
+                                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                Button(
+                                                    onClick = { permissionLauncher.launch(bluetoothPermissions) },
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252), contentColor = Color.White),
+                                                    modifier = Modifier.weight(1f)
+                                                ) {
+                                                    Text("Grant Permission", fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                                }
+                                                OutlinedButton(
+                                                    onClick = {
+                                                        try {
+                                                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                                                data = Uri.fromParts("package", context.packageName, null)
+                                                            }
+                                                            context.startActivity(intent)
+                                                        } catch (_: Exception) {}
+                                                    },
+                                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                                                    border = BorderStroke(1.dp, Color(0xFF64748B))
+                                                ) {
+                                                    Text("Settings", fontSize = 10.sp)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                is BluetoothControllerState.BluetoothDisabledOnDevice -> {
+                                    Surface(
+                                        color = Color(0xFF281F0B),
+                                        shape = RoundedCornerShape(8.dp),
+                                        border = BorderStroke(1.dp, Color(0xFFFFB300)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Icon(Icons.Default.BluetoothDisabled, contentDescription = null, tint = Color(0xFFFFB300), modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.width(6.dp))
+                                                Text("Bluetooth Is Turned Off", color = Color(0xFFFFD54F), fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                            }
+                                            Text(
+                                                "Please turn on Bluetooth to connect your phone as an Xbox controller.",
+                                                color = Color(0xFFCBD5E1),
+                                                fontSize = 10.sp
+                                            )
+                                            Button(
+                                                onClick = {
+                                                    try {
+                                                        enableBtLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+                                                    } catch (_: Exception) {
+                                                        try {
+                                                            context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+                                                        } catch (_: Exception) {}
+                                                    }
+                                                },
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFB300), contentColor = Color.Black),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Text("Turn On Bluetooth", fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                            }
+                                        }
+                                    }
                                 }
                                 is BluetoothControllerState.Unsupported -> {
-                                    Text(st.reason, color = Color(0xFFFF8888), fontSize = 11.sp)
+                                    Surface(
+                                        color = Color(0xFF281414),
+                                        shape = RoundedCornerShape(8.dp),
+                                        border = BorderStroke(1.dp, Color(0xFFFF6666)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(modifier = Modifier.padding(8.dp)) {
+                                            Text(st.reason, color = Color(0xFFFF8888), fontSize = 10.sp)
+                                        }
+                                    }
                                 }
                                 is BluetoothControllerState.Error -> {
-                                    Text(st.message, color = Color(0xFFFF0055), fontSize = 11.sp)
+                                    Surface(
+                                        color = Color(0xFF281414),
+                                        shape = RoundedCornerShape(8.dp),
+                                        border = BorderStroke(1.dp, Color(0xFFFF0055)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(modifier = Modifier.padding(8.dp)) {
+                                            Text(st.message, color = Color(0xFFFF6688), fontSize = 10.sp)
+                                        }
+                                    }
                                 }
                                 else -> {
                                     Text(
-                                        "Why Xbox App says \"Connect a controller\": Xbox Cloud Gaming on Samsung TV requires a Bluetooth Gamepad device, not a Wi-Fi TV remote.",
+                                        "Why Xbox App says \"Connect a controller\": Xbox Cloud Gaming on Samsung TV requires an authentic Bluetooth Gamepad device, not a Wi-Fi TV remote.",
                                         color = Color(0xFF94A3B8),
                                         fontSize = 11.sp,
                                         lineHeight = 15.sp
@@ -403,23 +641,121 @@ fun TvConnectDialog(
                             Spacer(Modifier.height(2.dp))
 
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                if (btState is BluetoothControllerState.Disabled || btState is BluetoothControllerState.Unsupported) {
-                                    Button(
-                                        onClick = { viewModel.bluetoothGamepadManager.startBluetoothController() },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF107C10), contentColor = Color.White),
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Text("Enable Bluetooth Gamepad", fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                                    }
-                                } else {
+                                if (btState is BluetoothControllerState.Connected || btState is BluetoothControllerState.ReadyToPair || btState is BluetoothControllerState.Connecting) {
                                     Button(
                                         onClick = { viewModel.bluetoothGamepadManager.stop() },
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155), contentColor = Color.White),
-                                        modifier = Modifier.weight(1f)
+                                        modifier = Modifier.weight(1f).testTag("btn_stop_bluetooth_gamepad")
                                     ) {
                                         Text("Stop Bluetooth Mode", fontSize = 11.sp)
                                     }
+                                } else {
+                                    Button(
+                                        onClick = { requestBluetoothAndStart() },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF107C10), contentColor = Color.White),
+                                        modifier = Modifier.weight(1f).testTag("btn_enable_bluetooth_gamepad")
+                                    ) {
+                                        Icon(Icons.Default.Bluetooth, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Enable Bluetooth Gamepad", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    }
                                 }
+                            }
+                        }
+                    }
+
+                    // AUTO-CONNECT TO PAIRED TV CARD
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFF131D24),
+                        border = BorderStroke(1.dp, Color(0xFF1E293B)),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Bolt, contentDescription = null, tint = Color(0xFFFFD600), modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("AUTO-CONNECT TO PAIRED TV", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                }
+                                Switch(
+                                    checked = prefs.btAutoConnect,
+                                    onCheckedChange = { viewModel.setBtAutoConnect(it) },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = Color(0xFF00FF66),
+                                        checkedTrackColor = Color(0xFF107C10)
+                                    )
+                                )
+                            }
+
+                            Text(
+                                "When enabled, phone automatically connects to your paired Samsung TV as soon as you open the app.",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 10.sp,
+                                lineHeight = 13.sp
+                            )
+
+                            val bondedDevices = remember(btState) { viewModel.bluetoothGamepadManager.getBondedDevices() }
+                            if (bondedDevices.isNotEmpty()) {
+                                Divider(color = Color(0xFF1E293B), thickness = 1.dp)
+                                Text("PAIRED TVS & DEVICES:", color = Color(0xFFCBD5E1), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+
+                                for (dev in bondedDevices) {
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = Color(0xFF0B141C),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (dev.isTvOrDisplay) Icons.Default.Tv else Icons.Default.Bluetooth,
+                                                    contentDescription = null,
+                                                    tint = if (dev.isTvOrDisplay) Color(0xFF00F0FF) else Color(0xFF94A3B8),
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Spacer(Modifier.width(6.dp))
+                                                Column {
+                                                    Text(
+                                                        dev.name,
+                                                        color = if (dev.isTvOrDisplay) Color(0xFF00FF66) else Color.White,
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 11.sp
+                                                    )
+                                                    Text(dev.address, color = Color(0xFF64748B), fontSize = 9.sp)
+                                                }
+                                            }
+
+                                            Button(
+                                                onClick = { viewModel.connectToBluetoothDevice(dev.address) },
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF107C10), contentColor = Color.White),
+                                                modifier = Modifier.height(28.dp)
+                                            ) {
+                                                Text("Connect ⚡", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                Text(
+                                    "No paired TVs found in Bluetooth yet. Once you pair with your Samsung TV once, it will appear here and auto-connect automatically!",
+                                    color = Color(0xFF64748B),
+                                    fontSize = 10.sp,
+                                    lineHeight = 13.sp
+                                )
                             }
                         }
                     }

@@ -18,6 +18,9 @@ data class SpadUserPreferences(
     val lastTvIp: String = "",
     val lastTvName: String = "",
     val tvToken: String = "",
+    val lastBtTvAddress: String = "",
+    val lastBtTvName: String = "",
+    val btAutoConnect: Boolean = true,
     val hapticEnabled: Boolean = true,
     val hapticStrength: Float = 0.8f,
     val experimentalGamingHub: Boolean = false,
@@ -34,6 +37,9 @@ class UserPreferencesRepository(private val context: Context) {
         val LAST_TV_IP = stringPreferencesKey("last_tv_ip")
         val LAST_TV_NAME = stringPreferencesKey("last_tv_name")
         val TV_TOKEN = stringPreferencesKey("tv_token")
+        val LAST_BT_TV_ADDRESS = stringPreferencesKey("last_bt_tv_address")
+        val LAST_BT_TV_NAME = stringPreferencesKey("last_bt_tv_name")
+        val BT_AUTO_CONNECT = booleanPreferencesKey("bt_auto_connect")
         val HAPTIC_ENABLED = booleanPreferencesKey("haptic_enabled")
         val HAPTIC_STRENGTH = floatPreferencesKey("haptic_strength")
         val EXPERIMENTAL_GAMING_HUB = booleanPreferencesKey("experimental_gaming_hub")
@@ -49,6 +55,9 @@ class UserPreferencesRepository(private val context: Context) {
             lastTvIp = prefs[Keys.LAST_TV_IP] ?: "",
             lastTvName = prefs[Keys.LAST_TV_NAME] ?: "",
             tvToken = prefs[Keys.TV_TOKEN] ?: "",
+            lastBtTvAddress = prefs[Keys.LAST_BT_TV_ADDRESS] ?: "",
+            lastBtTvName = prefs[Keys.LAST_BT_TV_NAME] ?: "",
+            btAutoConnect = prefs[Keys.BT_AUTO_CONNECT] ?: true,
             hapticEnabled = prefs[Keys.HAPTIC_ENABLED] ?: true,
             hapticStrength = prefs[Keys.HAPTIC_STRENGTH] ?: 0.8f,
             experimentalGamingHub = prefs[Keys.EXPERIMENTAL_GAMING_HUB] ?: false,
@@ -71,6 +80,19 @@ class UserPreferencesRepository(private val context: Context) {
             it[Keys.LAST_TV_IP] = ip
             it[Keys.LAST_TV_NAME] = name
             it[Keys.TV_TOKEN] = token
+        }
+    }
+
+    suspend fun saveBtTvConnection(address: String, name: String) {
+        context.dataStore.edit {
+            it[Keys.LAST_BT_TV_ADDRESS] = address
+            it[Keys.LAST_BT_TV_NAME] = name
+        }
+    }
+
+    suspend fun setBtAutoConnect(enabled: Boolean) {
+        context.dataStore.edit {
+            it[Keys.BT_AUTO_CONNECT] = enabled
         }
     }
 
